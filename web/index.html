@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Image Personalizer</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand"><span class="mark" aria-hidden="true">✳</span><span>Image Personalizer</span><span class="local">LOCAL</span></div>
+      <div class="services" aria-label="Service status"><span id="ollama">Ollama · checking</span><span id="comfyui">ComfyUI · checking</span></div>
+    </header>
+    <main>
+      <div class="intro"><p class="eyebrow">A LITTLE DIRECTION. ROOM TO DISCOVER.</p><h1>Make it more <em>you.</em></h1><p>Start with a few ideas. Rate what you see. Shape what comes next.</p></div>
+      <div class="workspace">
+        <aside class="controls">
+          <form id="generate-form">
+            <label for="preferences">Your starting ideas</label>
+            <textarea id="preferences" rows="3" maxlength="1000" placeholder="Japanese, floral…" required></textarea>
+            <p class="hint">A few words are enough. Leave the details to the model.</p>
+            <div class="label-row"><label for="mutation">Mutation</label><output id="mutation-value" for="mutation">20%</output></div>
+            <input id="mutation" type="range" min="0" max="100" step="1" value="20">
+            <div class="range-labels"><span>Refine</span><span>Explore</span></div>
+            <p class="hint">Chance of trying a different direction while keeping your starting ideas.</p>
+            <button id="generate" class="primary" type="submit">Generate first image <span aria-hidden="true">↗</span></button>
+          </form>
+          <div class="session-info"><span id="session-count">A fresh start</span><button id="reset" class="text-button" type="button" hidden>Start over</button></div>
+          <p id="saved-note" class="hint" hidden>Your previous sessions stay saved on this computer.</p>
+          <div class="workflow-note"><span class="small-dot"></span> Qwen Image 2.1 <span>1024 × 1024 · 25 steps</span></div>
+        </aside>
+        <section class="result" aria-label="Generated image and rating">
+          <div class="result-heading"><span id="image-label">YOUR NEXT DISCOVERY</span><span id="mode" class="pill" hidden></span></div>
+          <div class="canvas">
+            <img id="image" alt="Your generated image" hidden>
+            <div id="placeholder"><div id="empty-mark" aria-hidden="true">✳</div><h2 id="stage-title">An idea is all it takes.</h2><p id="stage-description">Your first image will appear here.</p></div>
+          </div>
+          <div id="status" class="status" role="status" aria-live="polite">Ready when you are.</div>
+          <div id="error" class="error" role="alert" hidden></div>
+          <button id="retry" class="secondary" type="button" hidden>Retry generation</button>
+          <form id="rating-form" hidden>
+            <div class="rating-heading"><label for="score">How much do you like it?</label><span>0 = not for me · 100 = love it</span></div>
+            <div class="rating-row"><input id="score" type="number" min="0" max="100" step="1" placeholder="0–100" required aria-label="Image score from 0 to 100"><button id="rate" class="primary" type="submit">Save &amp; generate next <span aria-hidden="true">→</span></button></div>
+          </form>
+          <details id="prompt-details" hidden><summary>Generated prompt</summary><p id="prompt"></p><p id="rationale"></p></details>
+        </section>
+      </div>
+    </main>
+    <footer><span>Small experiments, personal discoveries.</span><span>Images and ratings saved locally.</span></footer>
+  </div>
+</body>
+</html>
