@@ -9,26 +9,40 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import ROOT, Settings
+from app.aspect_ratios import ASPECT_RATIOS, AspectRatio, image_format
 from app.db import Database
 from app.services.generation import Generator
+from app.statistics import score_statistics
 
 
 class StartRequest(BaseModel):
+    aspect_ratio: AspectRatio = "1:1"
+    name: str = Field(default="", max_length=80)
     preferences: str = Field(min_length=1, max_length=1000)
     mutation: int = Field(default=20, ge=0, le=100, strict=True)
 
 
 class RatingRequest(BaseModel):
+    aspect_ratio: AspectRatio | None = None
     score: int = Field(ge=0, le=100, strict=True)
     mutation: int = Field(ge=0, le=100, strict=True)
+    feedback: str = Field(default="", max_length=1000)
+    generate_next: bool = Field(default=True, strict=True)
+
+
+class NameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
 
 
 def create_app(settings=None):
     settings = settings or Settings()
-    db = Database(settings.data_dir)
+    db = None
 
     @asynccontextmanager
     async def lifespan(app):
+        nonlocal db
+        db = Database(settings.data_dir)
+        app.state.db = db
         db.recover()
         async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
             app.state.generator = Generator(db, settings, client)
@@ -40,7 +54,6 @@ def create_app(settings=None):
                     await task
 
     app = FastAPI(title="Image Personalizer", lifespan=lifespan)
-    app.state.db = db
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")
@@ -59,6 +72,7 @@ def create_app(settings=None):
         if row is None:
             return None
         return {k: v for k, v in row.items() if k not in {"workflow_json", "llm_request_json"}} | {
+            "image_format": image_format(row["aspect_ratio"]),
             "image_url": f"/api/images/{row['id']}" if row["image_name"] else None,
         }
 
@@ -77,8 +91,31 @@ def create_app(settings=None):
     async def state():
         session = db.session()
         rows = db.generations(session["id"]) if session else []
+        statistics = score_statistics(rows)
         return {"session": session, "generation": public(rows[-1]) if rows else None,
-                "rated_count": sum(r["score"] is not None for r in rows), "busy": app.state.generator.busy}
+                "aspect_ratios": [image_format(ratio) for ratio in ASPECT_RATIOS],
+                "rated_count": statistics["count"], "statistics": statistics, "busy": app.state.generator.busy}
+
+    @app.get("/api/sessions")
+    async def sessions():
+        return db.sessions()
+
+    @app.post("/api/sessions/{session_id}/load")
+    async def load_session(session_id: str):
+        idle()
+        if not db.load_session(session_id):
+            raise HTTPException(404, "Session not found.")
+        return await state()
+
+    @app.post("/api/sessions/{session_id}/rename")
+    async def rename_session(session_id: str, payload: NameRequest):
+        idle()
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(422, "Enter a session name.")
+        if not db.rename_session(session_id, name):
+            raise HTTPException(404, "Session not found.")
+        return {"ok": True}
 
     @app.get("/api/health")
     async def health():
@@ -104,20 +141,26 @@ def create_app(settings=None):
         session = db.session()
         if session and db.generations(session["id"]):
             raise HTTPException(409, "Rate the current image, retry, or start over.")
-        session = session or db.create_session(preferences, payload.mutation)
-        return public(app.state.generator.create(session, payload.mutation))
+        session = session or db.create_session(preferences, payload.mutation, payload.name, payload.aspect_ratio)
+        return public(app.state.generator.create(session, payload.mutation, aspect_ratio=payload.aspect_ratio))
 
     @app.post("/api/generations/{generation_id}/rate", status_code=202)
     async def rate(generation_id: str, payload: RatingRequest):
         session, row = current(generation_id)
         rows = db.generations(session["id"])
-        if row["score"] is not None:
+        successor = next((r for r in rows if r["sequence"] == row["sequence"] + 1), None)
+        if payload.generate_next and row["score"] is not None and successor:
             # A double click or lost response must not save another rating/job.
-            return public(next(r for r in rows if r["sequence"] == row["sequence"] + 1))
+            return public(successor)
         idle()
         if row["status"] != "complete" or rows[-1]["id"] != generation_id:
             raise HTTPException(409, "Wait for the current image before rating it.")
-        return public(app.state.generator.create(session, payload.mutation, rating=(generation_id, payload.score)))
+        feedback = payload.feedback.strip()
+        if not payload.generate_next:
+            db.save_rating(generation_id, payload.score, feedback, payload.mutation, payload.aspect_ratio)
+            return JSONResponse(public(db.get(generation_id)), status_code=200)
+        return public(app.state.generator.create(session, payload.mutation,
+            rating=(generation_id, payload.score), feedback=feedback, aspect_ratio=payload.aspect_ratio))
 
     @app.post("/api/generations/{generation_id}/retry", status_code=202)
     async def retry(generation_id: str):

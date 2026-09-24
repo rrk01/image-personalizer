@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import httpx
 
+from app.aspect_ratios import ASPECT_RATIOS
 from app.preferences import build_request, is_mutation
 from app.services.comfyui import ComfyUI
 from app.services.ollama import Ollama
@@ -24,11 +25,15 @@ class Generator:
     def busy(self):
         return self.task is not None and not self.task.done()
 
-    def create(self, session, mutation, rating=None):
+    def create(self, session, mutation, rating=None, feedback="", aspect_ratio=None):
+        aspect_ratio = aspect_ratio or session["aspect_ratio"]
         graph = json.loads(self.settings.workflow_path.read_text())
+        graph["13"]["inputs"]["aspect_ratio"] = ASPECT_RATIOS[aspect_ratio]
+        graph["13"]["inputs"]["megapixels"] = 1
+        graph["13"]["inputs"]["multiple"] = 16
         seed = secrets.randbelow(2**53)
         graph["458"]["inputs"]["seed"] = seed
-        row = self.db.create_generation(session["id"], mutation, is_mutation(mutation), seed, graph, rating)
+        row = self.db.create_generation(session["id"], mutation, is_mutation(mutation), seed, graph, rating, feedback, aspect_ratio)
         self.start(row["id"])
         return row
 
@@ -48,7 +53,7 @@ class Generator:
                     await self.comfy.unload()
                     self.db.update(generation_id, status="prompting")
                     session = self.db.session()
-                    request = build_request(self.settings.ollama_model, session["preferences"], self.db.generations(session["id"]), bool(row["mutated"]))
+                    request = build_request(self.settings.ollama_model, session["preferences"], self.db.generations(session["id"]), bool(row["mutated"]), row["aspect_ratio"])
                     self.db.update(generation_id, llm_request_json=json.dumps(request))
                     try:
                         prompt, rationale = await self.ollama.generate(request)
@@ -93,4 +98,3 @@ class Generator:
             else:
                 message = str(exc) or type(exc).__name__
             self.db.update(generation_id, status="error", error=message)
-

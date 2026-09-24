@@ -3,6 +3,47 @@ let state = null;
 let pending = false;
 let renderKey = "";
 let ratingFor = null;
+let nameFor = null;
+let ratioFor = null;
+let ratiosLoaded = false;
+let sessions = [];
+let refreshVersion = 0;
+
+const number = (value) => value == null ? "—" : Number(value).toFixed(1);
+
+function sessionSummary() {
+  const session = sessions.find((s) => s.id === $("sessions").value);
+  $("session-summary").textContent = session
+    ? `${new Date(session.created_at).toLocaleDateString()} · ${session.image_count} ${session.image_count === 1 ? "image" : "images"} · ${session.rated_count} ${session.rated_count === 1 ? "rating" : "ratings"} · average ${number(session.mean_score)}`
+    : "Sessions are saved automatically on this computer.";
+  $("load-session").disabled = !session || session.id === state?.session?.id || pending || state?.busy;
+}
+
+async function refreshSessions() {
+  sessions = await api("/api/sessions");
+  const selected = $("sessions").value;
+  $("sessions").replaceChildren(new Option("Choose a session…", ""));
+  for (const session of sessions) {
+    $("sessions").add(new Option(session.name, session.id));
+  }
+  $("sessions").value = sessions.some((s) => s.id === selected) ? selected : state?.session?.id ?? "";
+  sessionSummary();
+}
+
+function ratingDirty() {
+  const g = state?.generation;
+  return g?.status === "complete" && ($("score").value !== String(g.score ?? "") || $("feedback").value.trim() !== (g.feedback ?? ""));
+}
+
+function ratioDirty() {
+  return $("aspect-ratio").value !== (state?.session?.aspect_ratio ?? "1:1");
+}
+
+function canSwitch() {
+  const nameDirty = $("session-name").value.trim() !== (state?.session?.name ?? "");
+  const ideasDirty = !state?.session && $("preferences").value.trim();
+  return !(ratingDirty() || ratioDirty() || nameDirty || ideasDirty) || confirm("You have unsaved changes. Switch sessions without saving them?");
+}
 
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
@@ -22,6 +63,22 @@ function render() {
   if (!state) return;
   const {session, generation: g, busy, rated_count} = state;
   const locked = busy || pending;
+  if (!ratiosLoaded) {
+    $("aspect-ratio").replaceChildren(...state.aspect_ratios.map((r) => new Option(r.label, r.aspect_ratio)));
+    ratiosLoaded = true;
+  }
+  const ratioKey = JSON.stringify([session?.id, session?.aspect_ratio]);
+  if (ratioFor !== ratioKey) {
+    $("aspect-ratio").value = session?.aspect_ratio ?? "1:1";
+    ratioFor = ratioKey;
+  }
+  $("aspect-ratio").disabled = locked;
+  const nextFormat = state.aspect_ratios.find((r) => r.aspect_ratio === $("aspect-ratio").value);
+  $("next-size").textContent = `${nextFormat.width} × ${nextFormat.height}`;
+  const displayedFormat = g?.image_format ?? nextFormat;
+  $("canvas").style.aspectRatio = `${displayedFormat.width} / ${displayedFormat.height}`;
+  $("image-size").hidden = !g;
+  $("image-size").textContent = g ? `${g.aspect_ratio} · ${displayedFormat.width} × ${displayedFormat.height}` : "";
   const key = JSON.stringify([session?.id, g?.id, g?.status, g?.error]);
   if (renderKey !== key) {
     if (session) $("preferences").value = session.preferences;
@@ -53,10 +110,22 @@ function render() {
     message(g?.error ?? "");
     renderKey = key;
   }
-  if (ratingFor !== g?.id) {
-    $("score").value = "";
-    ratingFor = g?.id;
+  const ratingKey = JSON.stringify([g?.id, g?.score, g?.feedback, g?.rated_at]);
+  if (ratingFor !== ratingKey) {
+    $("score").value = g?.score ?? "";
+    $("feedback").value = g?.feedback ?? "";
+    ratingFor = ratingKey;
   }
+  const nameKey = JSON.stringify([session?.id, session?.name]);
+  if (nameFor !== nameKey) {
+    $("session-name").value = session?.name ?? "";
+    nameFor = nameKey;
+  }
+  $("session-name").disabled = locked;
+  $("rename").hidden = !session;
+  $("rename").disabled = locked;
+  $("sessions").disabled = locked;
+  sessionSummary();
   $("mutation-value").textContent = `${$("mutation").value}%`;
   $("preferences").disabled = !!session || locked;
   $("mutation").disabled = locked;
@@ -68,25 +137,45 @@ function render() {
   $("session-count").textContent = session ? `${rated_count} ${rated_count === 1 ? "rating" : "ratings"} in this session` : "A fresh start";
   $("rating-form").hidden = g?.status !== "complete";
   $("score").disabled = locked;
+  $("feedback").disabled = locked;
+  $("save-rating").disabled = locked;
   $("rate").disabled = locked;
+  $("rating-note").textContent = ratingDirty() || ratioDirty() ? "Unsaved changes — choose a save button below."
+    : g?.score != null ? "Rating saved. You can update it or generate the next image." : "Your score helps shape the next image.";
+  $("statistics").hidden = !session;
+  const stats = state.statistics;
+  $("stat-count").textContent = stats.count;
+  $("stat-mean").textContent = number(stats.mean);
+  $("stat-best").textContent = stats.best ?? "—";
+  $("stat-deviation").textContent = number(stats.standard_deviation);
+  $("statistics-note").textContent = "Standard deviation shows how widely your scores vary. " +
+    (stats.count < 2 ? "Rate at least two images to see it." : stats.count < 5 ? "Still early: fewer than five ratings give limited evidence." : "Based on all saved ratings in this session.");
   $("retry").hidden = g?.status !== "error";
   $("retry").disabled = locked;
   $("placeholder").classList.toggle("working", busy);
 }
 
 async function refresh() {
-  state = await api("/api/state");
+  const version = ++refreshVersion;
+  const updated = await api("/api/state");
+  if (version !== refreshVersion) return;
+  const completed = updated.generation?.status === "complete" &&
+    (state?.generation?.id !== updated.generation.id || state?.generation?.status !== "complete");
+  state = updated;
   render();
+  if (completed) await refreshSessions();
 }
 
 async function action(callback) {
   if (pending) return;
   pending = true;
+  ++refreshVersion;
   render();
   message("");
   try {
     await callback();
     await refresh();
+    await refreshSessions();
   } catch (error) {
     message(error.message);
   } finally {
@@ -96,22 +185,41 @@ async function action(callback) {
 }
 
 $("mutation").addEventListener("input", () => { $("mutation-value").textContent = `${$("mutation").value}%`; });
+$("aspect-ratio").addEventListener("change", render);
 $("generate-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  action(() => api("/api/generate", {preferences: $("preferences").value.trim(), mutation: Number($("mutation").value)}));
+  action(() => api("/api/generate", {name: $("session-name").value.trim(), preferences: $("preferences").value.trim(), mutation: Number($("mutation").value), aspect_ratio: $("aspect-ratio").value}));
 });
 $("rating-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const score = Number($("score").value);
   if (!$("score").value || !Number.isInteger(score) || score < 0 || score > 100) return;
-  action(() => api(`/api/generations/${state.generation.id}/rate`, {score, mutation: Number($("mutation").value)}));
+  const generateNext = event.submitter?.id === "rate";
+  action(() => api(`/api/generations/${state.generation.id}/rate`, {
+    score, feedback: $("feedback").value.trim(), mutation: Number($("mutation").value), generate_next: generateNext,
+    aspect_ratio: $("aspect-ratio").value,
+  }));
+});
+$("score").addEventListener("input", render);
+$("feedback").addEventListener("input", render);
+$("sessions").addEventListener("change", sessionSummary);
+$("name-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (state?.session) action(() => api(`/api/sessions/${state.session.id}/rename`, {name: $("session-name").value.trim()}));
+});
+$("load-session").addEventListener("click", () => {
+  if (canSwitch()) action(() => api(`/api/sessions/${$("sessions").value}/load`, {}));
 });
 $("retry").addEventListener("click", () => action(() => api(`/api/generations/${state.generation.id}/retry`, {})));
-$("reset").addEventListener("click", () => action(async () => {
+$("reset").addEventListener("click", () => {
+  if (!canSwitch()) return;
+  action(async () => {
   await api("/api/reset", {});
   $("preferences").value = "";
   $("mutation").value = 20;
-}));
+  $("sessions").value = "";
+  });
+});
 
 async function health() {
   try {
@@ -124,10 +232,14 @@ async function health() {
 }
 
 async function poll() {
-  try { await refresh(); }
+  try { if (!pending) await refresh(); }
   catch { message("Cannot reach Image Personalizer. Make sure the app is running; this page will reconnect automatically."); renderKey = ""; }
   setTimeout(poll, 1500);
 }
 health();
 setInterval(health, 15000);
 poll();
+refreshSessions().catch((error) => message(error.message));
+window.addEventListener("beforeunload", (event) => {
+  if (ratingDirty() || ratioDirty()) { event.preventDefault(); event.returnValue = ""; }
+});
